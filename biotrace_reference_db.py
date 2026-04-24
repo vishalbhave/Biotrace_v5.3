@@ -78,11 +78,21 @@ def init_db():
 # GEOGRAPHIC CACHE
 # ---------------------------------------------------------
 def get_geographic_cache(locality: str) -> dict:
+def get_geographic_cache(locality: str) -> dict:
     conn = _get_connection()
-    c = conn.cursor()
-    c.execute("SELECT lat, lon, geojson_polygon FROM geographic WHERE locality = ?", (locality,))
-    row = c.fetchone()
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT lat, lon, geojson_polygon FROM geographic WHERE locality = ?", (locality,))
+        row = c.fetchone()
+        if row:
+            return {
+                "lat": row[0],
+                "lon": row[1],
+                "geojson_polygon": json.loads(row[2]) if row[2] else None
+            }
+    finally:
+        conn.close()
+    return {}
     if row:
         return {
             "lat": row[0],
