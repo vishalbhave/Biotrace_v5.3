@@ -100,8 +100,17 @@ class GeocodingCascade:
             except ImportError:
                 logger.warning("[geocoding] nominatim_geocoder unavailable — pip install geopy")
             except Exception as exc:
+            except Exception as exc:
                 logger.warning("[geocoding] Nominatim init: %s", exc)
 
+        # Tool 5 — Local Offline OSM
+        self._india_data = None
+        if _GPD_AVAILABLE and os.path.exists("india_data.gpkg"):
+            try:
+                self._india_data = gpd.read_file("india_data.gpkg", layer="multipolygons")
+                logger.info("[geocoding] Offline OSM data loaded")
+            except Exception as exc:
+                logger.warning("[geocoding] Offline OSM load: %s", exc)
     # ─────────────────────────────────────────────────────────────────────────
     #  Tool 1 · DMS string parsing
     # ─────────────────────────────────────────────────────────────────────────
