@@ -209,9 +209,9 @@ class GeocodingCascade:
 
             # Local Offline OSM Geopackage query
             if _GPD_AVAILABLE and os.path.exists("india_data.gpkg"):
+            if self._india_data is not None:
                 try:
-                    df = gpd.read_file("india_data.gpkg", layer="multipolygons")
-                    # Try exact match first
+                    df = self._india_data
                     match = df[df["name"].str.lower() == locality.lower()]
 
                     # If no exact match and fuzzy matching is available, try fuzzy
