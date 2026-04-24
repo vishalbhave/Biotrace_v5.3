@@ -181,6 +181,9 @@ def load_all_cache(table_name="geographic"):
     return rows
 
 def delete_cache_record(table_name: str, key_column: str, key_value: str):
+    allowed_tables = {"geographic": "locality", "taxonomy": "verbatim_name", "habitat": "species"}
+    if table_name not in allowed_tables or key_column != allowed_tables[table_name]:
+        raise ValueError(f"Invalid table or column: {table_name}.{key_column}")
     conn = _get_connection()
     c = conn.cursor()
     try:
