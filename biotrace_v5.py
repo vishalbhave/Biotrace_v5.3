@@ -90,7 +90,7 @@ try:
     from biotrace_locality_guard_patch import PROMPT_LOCALITY_GUARD, post_parse_locality_filter
 except ImportError:
     PROMPT_LOCALITY_GUARD = ""
-    def post_parse_locality_filter(o): return o
+    def post_parse_locality_filter(o): return o, []
 
 from biotrace_traiter_prepass import run_prepass, format_annotations_for_prompt
 
