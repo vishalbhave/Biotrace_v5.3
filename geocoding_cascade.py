@@ -186,6 +186,47 @@ class GeocodingCascade:
 
             locality = str(occ.get("verbatimLocality","")).strip()
 
+
+            # Progressive Learning: Check local reference cache first!
+            cached = get_geographic_cache(locality)
+            if cached and cached.get("lat") is not None and cached.get("lon") is not None:
+                occ["decimalLatitude"] = cached["lat"]
+                occ["decimalLongitude"] = cached["lon"]
+                if cached.get("geojson_polygon"):
+                    occ["geojson_polygon"] = cached["geojson_polygon"]
+                occ["geocodingSource"] = "Local_Ref_Cache"
+                occ = self._validate(occ)
+                result.append(occ); continue
+
+            # Local Offline OSM Geopackage query
+            if _GPD_AVAILABLE and os.path.exists("india_data.gpkg"):
+                try:
+                    df = gpd.read_file("india_data.gpkg", layer="multipolygons")
+                    # Try exact match first
+                    match = df[df["name"].str.lower() == locality.lower()]
+
+                    # If no exact match and fuzzy matching is available, try fuzzy
+                    if match.empty and _FUZZ_AVAILABLE:
+                        names = df["name"].dropna().tolist()
+                        best_match = fuzz_process.extractOne(locality, names, scorer=fuzz.ratio)
+                        if best_match and best_match[1] > 85: # Threshold
+                            match = df[df["name"] == best_match[0]]
+
+                    if not match.empty:
+                        geom = match.iloc[0].geometry
+                        occ["decimalLatitude"] = geom.centroid.y
+                        occ["decimalLongitude"] = geom.centroid.x
+                        occ["geojson_polygon"] = geom.__geo_interface__
+                        occ["geocodingSource"] = "Local_Offline_OSM"
+                        occ = self._validate(occ)
+
+                        # Save to cache for progressive learning
+                        save_geographic_cache(locality, occ["decimalLatitude"], occ["decimalLongitude"], occ["geojson_polygon"], approved_by="Local_OSM")
+
+                        result.append(occ); continue
+                except Exception as e:
+                    logger.warning("[geocoding/Offline OSM] Error querying geopackage: %s", e)
+
             # Step 2: Pincode geocoder
             if self._pincode and locality:
                 try:

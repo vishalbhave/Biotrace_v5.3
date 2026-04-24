@@ -69,32 +69,42 @@ for _d in [DATA_DIR, CSV_DIR, PDF_DIR]:
 
 # [ENHANCEMENT: biotrace_geocoding_lifestage_patch] — Patch A: Nominatim India
 # bias + Patch B: LLM prompt life-stage guard + post-parse filter
-from biotrace_geocoding_lifestage_patch import (
-    patch_geocoding_cascade,
-    PROMPT_LIFESTAGE_GUARD,
-    post_parse_lifestage_filter,
-    scan_genus_context,
-)
 
-# [ENHANCEMENT: biotrace_locality_guard_patch] — Locality guard: rejects
-# morphology-as-locality and habitat-as-locality from LLM output
-from biotrace_locality_guard_patch import PROMPT_LOCALITY_GUARD, post_parse_locality_filter
+# [ENHANCEMENT: biotrace_geocoding_lifestage_patch] — Patch A: Nominatim India
+# bias + Patch B: LLM prompt life-stage guard + post-parse filter
+try:
+    from biotrace_geocoding_lifestage_patch import (
+        patch_geocoding_cascade,
+        PROMPT_LIFESTAGE_GUARD,
+        post_parse_lifestage_filter,
+        scan_genus_context,
+    )
+except ImportError:
+    def patch_geocoding_cascade(): pass
+    PROMPT_LIFESTAGE_GUARD = ""
+    def post_parse_lifestage_filter(occs): return occs
+    def scan_genus_context(o, t): return o
 
-# [ENHANCEMENT: biotrace_traiter_prepass] — Stage 0: rule-based spaCy pre-pass
-# annotates taxa, localities, measurements, habitats before LLM sees the text
+# [ENHANCEMENT: biotrace_locality_guard_patch]
+try:
+    from biotrace_locality_guard_patch import PROMPT_LOCALITY_GUARD, post_parse_locality_filter
+except ImportError:
+    PROMPT_LOCALITY_GUARD = ""
+    def post_parse_locality_filter(o): return o
+
 from biotrace_traiter_prepass import run_prepass, format_annotations_for_prompt
 
-# NOTE: biotrace_dedup_patch.dedup_occurrences is imported AFTER the biotrace_gnv
-# try/except block below (~line 225) so it correctly overrides the gnv version.
-# DO NOT import it here — a premature import would be silently overwritten by gnv.
+# [ENHANCEMENT: biotrace_dedup_patch]
+try:
+    from biotrace_dedup_patch import dedup_occurrences, suppress_regional_duplicates
+except ImportError:
+    def dedup_occurrences(occs): return occs, 0
+    def suppress_regional_duplicates(occs): return occs, 0
 
 if not st.session_state.get("_geo_patched"):
     patch_geocoding_cascade()
     st.session_state["_geo_patched"] = True
-    
-    
-from biotrace_dedup_patch import dedup_occurrences
-from biotrace_dedup_patch import suppress_regional_duplicates
+
 from biotrace_progress_logger import BioTraceLogger, render_species_progress_panel
 
 
