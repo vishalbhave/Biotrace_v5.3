@@ -131,29 +131,24 @@ def suppress_regional_duplicates(occurrences):
     return occurrences, 0
 
 
-def _render_verification_table(*args, **kwargs):
-    import streamlit as st
-    st.info("Verification table logic goes here.")
 
-def _render_tnr_tab(*args, **kwargs):
-    import streamlit as st
-    st.info("TNR tab logic goes here.")
+try:
+    from biotrace_v5_enhancements import (
+        render_verification_table       as _render_verification_table,
+        render_tnr_tab                  as _render_tnr_tab,
+        render_locality_tab             as _render_locality_tab,
+        render_schema_diagnostics       as _render_schema_diagnostics,
+        render_ollama_model_selector    as _render_ollama_model_selector,
+        occurrences_to_verification_df,
+    )
+except ImportError:
+    _render_verification_table = None
+    _render_tnr_tab = None
+    _render_locality_tab = None
+    _render_schema_diagnostics = None
+    _render_ollama_model_selector = None
+    def occurrences_to_verification_df(o): return []
 
-def _render_locality_tab(*args, **kwargs):
-    import streamlit as st
-    st.info("Locality tab logic goes here.")
-
-def _render_schema_diagnostics(*args, **kwargs):
-    import streamlit as st
-    st.info("Schema diagnostics logic goes here.")
-
-def _render_ollama_model_selector(*args, **kwargs):
-    import streamlit as st
-    return st.selectbox("Model", ["llama3", "phi3", "mistral"])
-
-def occurrences_to_verification_df(occurrences):
-    import pandas as pd
-    return pd.DataFrame(occurrences)
 
 
 from biotrace_progress_logger import BioTraceLogger, render_species_progress_panel
