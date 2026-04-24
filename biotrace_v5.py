@@ -133,7 +133,7 @@ def suppress_regional_duplicates(occurrences):
 
 
 try:
-    from archive.biotrace_v5_enhancements import (
+    from biotrace_v5_enhancements import (
         render_verification_table       as _render_verification_table,
         render_tnr_tab                  as _render_tnr_tab,
         render_locality_tab             as _render_locality_tab,

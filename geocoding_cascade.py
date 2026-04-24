@@ -218,57 +218,36 @@ class GeocodingCascade:
                 occ = self._validate(occ)
                 result.append(occ); continue
 
-            # Local Offline OSM Geopackage query (Zonal)
-            if _GPD_AVAILABLE and os.path.exists("geodata"):
+            # Local Offline OSM Geopackage query (Zonal) via core.osm_db_handler
+            if os.path.exists("geodata"):
                 import glob
-                import pyogrio
                 match_found = False
                 zonal_files = glob.glob("geodata/*.gpkg") + glob.glob("geodata/*.gpkg.zip")
-                for z_file in zonal_files:
-                    try:
-                        # List all layers in the GPKG file
-                        layers = pyogrio.list_layers(z_file)
-                        for layer_info in layers:
-                            layer_name = layer_info[0]
-                            # Only search layers that likely contain named places or natural features
-                            if "places" in layer_name or "natural" in layer_name or "water" in layer_name or "protected_areas" in layer_name:
-                                try:
-                                    df = gpd.read_file(z_file, layer=layer_name, engine="pyogrio")
-                                    if "name" not in df.columns:
-                                        continue
 
-                                    # Try exact match first
-                                    match = df[df["name"].str.lower() == locality.lower()]
+                try:
+                    from core.osm_db_handler import OSMDatabaseHandler
+                    for z_file in zonal_files:
+                        handler = OSMDatabaseHandler(db_path=z_file)
+                        res = handler.search_locality(locality)
 
-                                    # If no exact match and fuzzy matching is available, try fuzzy
-                                    if match.empty and _FUZZ_AVAILABLE:
-                                        names = df["name"].dropna().tolist()
-                                        if not names: continue
-                                        best_match = fuzz_process.extractOne(locality, names, scorer=fuzz.ratio)
-                                        if best_match and best_match[1] > 85: # Threshold
-                                            match = df[df["name"] == best_match[0]]
+                        if res:
+                            occ["decimalLatitude"] = res["lat"]
+                            occ["decimalLongitude"] = res["lon"]
+                            occ["geojson_polygon"] = res.get("geojson")
+                            zone_name = os.path.basename(z_file).split('.')[0]
+                            occ["geocodingSource"] = f"Local_Offline_OSM_{zone_name}_{res.get('match_type')}"
+                            occ = self._validate(occ)
 
-                                    if not match.empty:
-                                        geom = match.iloc[0].geometry
-                                        occ["decimalLatitude"] = geom.centroid.y
-                                        occ["decimalLongitude"] = geom.centroid.x
-                                        occ["geojson_polygon"] = geom.__geo_interface__
-                                        occ["geocodingSource"] = f"Local_Offline_OSM_{os.path.basename(z_file)}"
-                                        occ = self._validate(occ)
+                            # Save to cache for progressive learning
+                            save_geographic_cache(locality, occ["decimalLatitude"], occ["decimalLongitude"], occ["geojson_polygon"], approved_by=f"OSM_{zone_name}")
 
-                                        # Save to cache for progressive learning
-                                        save_geographic_cache(locality, occ["decimalLatitude"], occ["decimalLongitude"], occ["geojson_polygon"], approved_by="Local_OSM")
-
-                                        result.append(occ)
-                                        match_found = True
-                                        break # Found match in this layer
-                                except Exception as le:
-                                    logger.debug("[geocoding/Offline OSM] Error reading layer %s in %s: %s", layer_name, z_file, le)
-                    except Exception as e:
-                        logger.warning("[geocoding/Offline OSM] Error parsing GPKG %s: %s", z_file, e)
-
-                    if match_found:
-                        break # Found match in this file
+                            result.append(occ)
+                            match_found = True
+                            break # Found match in this zone, stop searching others
+                except ImportError:
+                    logger.debug("core.osm_db_handler missing")
+                except Exception as e:
+                    logger.error("[geocoding/Offline OSM] Unexpected error: %s", e)
 
                 if match_found:
                     continue
