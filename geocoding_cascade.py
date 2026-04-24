@@ -24,31 +24,6 @@ Usage
 """
 from __future__ import annotations
 import logging, os, sqlite3
-
-try:
-    from core.osm_db_handler import OSMDatabaseHandler
-except ImportError:
-    OSMDatabaseHandler = None
-
-try:
-    from biotrace_reference_db import get_geographic_cache, save_geographic_cache
-except ImportError:
-    def get_geographic_cache(loc): return {}
-    def save_geographic_cache(loc, lat, lon, poly=None, approved_by="sys"): pass
-
-try:
-    import geopandas as gpd
-    _GPD_AVAILABLE = True
-except ImportError:
-    _GPD_AVAILABLE = False
-
-try:
-    from rapidfuzz import fuzz
-    from rapidfuzz import process as fuzz_process
-    _FUZZ_AVAILABLE = True
-except ImportError:
-    _FUZZ_AVAILABLE = False
-
 from typing import Optional
 logger = logging.getLogger("biotrace.geocoding")
 
@@ -97,7 +72,6 @@ class GeocodingCascade:
     ):
         self.geonames_db   = geonames_db
         self.use_nominatim = use_nominatim
-        self._osm_handler = OSMDatabaseHandler() if OSMDatabaseHandler else None
 
         # Tool 2 — IndianPincodeGeocoder
         self._pincode = None
@@ -211,43 +185,6 @@ class GeocodingCascade:
                 result.append(occ); continue
 
             locality = str(occ.get("verbatimLocality","")).strip()
-
-
-            # Progressive Learning: Check local reference cache first!
-            cached = get_geographic_cache(locality)
-            if cached and cached.get("lat") is not None and cached.get("lon") is not None:
-                occ["decimalLatitude"] = cached["lat"]
-                occ["decimalLongitude"] = cached["lon"]
-                if cached.get("geojson_polygon"):
-                    occ["geojson_polygon"] = cached["geojson_polygon"]
-                occ["geocodingSource"] = "Local_Ref_Cache"
-                occ = self._validate(occ)
-                result.append(occ); continue
-
-            # Local Offline OSM Geopackage query (Zonal)
-            if self._osm_handler:
-                osm_match = self._osm_handler.search_locality(locality)
-                if osm_match:
-                    occ["decimalLatitude"] = osm_match["lat"]
-                    occ["decimalLongitude"] = osm_match["lon"]
-                    if "geojson" in osm_match:
-                        occ["geojson_polygon"] = osm_match["geojson"]
-
-                    source_file = osm_match.get("source_file", "unknown.gpkg")
-                    occ["geocodingSource"] = f"Local_Offline_OSM_{source_file}"
-                    occ = self._validate(occ)
-
-                    # Save to cache for progressive learning
-                    save_geographic_cache(
-                        locality,
-                        occ["decimalLatitude"],
-                        occ["decimalLongitude"],
-                        occ.get("geojson_polygon"),
-                        approved_by="Local_OSM"
-                    )
-
-                    result.append(occ)
-                    continue
 
             # Step 2: Pincode geocoder
             if self._pincode and locality:

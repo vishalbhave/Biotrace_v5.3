@@ -73,6 +73,8 @@ import hashlib
 import logging
 import os
 import re
+import _re
+
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Iterator
@@ -556,6 +558,46 @@ class HierarchicalChunker:
              "paragraphs":r[3],"sentences":r[4],"ingested_at":r[5]}
             for r in rows
         ]
+        
+    _TABLE_ROW_RE = _re.compile(r"^\|.*\|", _re.MULTILINE)
+    _TABLE_BLOCK_RE = _re.compile(
+        r"(\|[^\n]+\|\n)(\|[-:| ]+\|\n)((?:\|[^\n]+\|\n)+)",
+        _re.MULTILINE,
+    )
+
+    def _split_preserving_tables(self, text: str, target_chars: int) -> list[str]:
+        """
+        Split text into chunks of ~target_chars, but NEVER split inside a
+        Markdown table block. If a table is larger than target_chars, it is
+        returned as a single oversized chunk with a header prefix.
+        """
+        # Mark table spans
+        table_spans = [(m.start(), m.end()) for m in _TABLE_BLOCK_RE.finditer(text)]
+
+        chunks: list[str] = []
+        pos = 0
+        current: list[str] = []
+        current_len = 0
+
+        lines = text.splitlines(keepends=True)
+        line_pos = 0
+
+        for line in lines:
+            in_table = any(s <= line_pos < e for s, e in table_spans)
+
+            if current_len + len(line) > target_chars and not in_table and current:
+                chunks.append("".join(current))
+                current = []
+                current_len = 0
+
+            current.append(line)
+            current_len += len(line)
+            line_pos += len(line)
+
+        if current:
+            chunks.append("".join(current))
+
+        return [c for c in chunks if c.strip()]
 
     def close(self):
         self._conn.close()

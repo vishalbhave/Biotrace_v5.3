@@ -97,28 +97,28 @@ def _extract_via_pdftitle(pdf_path: str) -> str:
 #  Strategy 1 — XMP / Document Info metadata
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _extract_via_metadata(pdf_bytes: bytes) -> str:
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        # XMP first (more reliable for modern academic PDFs)
-        xmp = doc.get_xml_metadata()
-        if xmp:
-            m = re.search(r"<dc:title[^>]*>.*?<rdf:li[^>]*>(.*?)</rdf:li>", xmp, re.DOTALL)
-            if m:
-                t = _clean(re.sub(r"<[^>]+>", "", m.group(1)))
-                if not _is_noise(t):
-                    logger.debug(f"[title/xmp] '{t[:80]}'")
-                    return _trim_to_sentence(t)
-        # DocInfo fallback
-        meta_title = _clean((doc.metadata or {}).get("title", ""))
-        if meta_title and not _is_noise(meta_title) and not re.match(
-            r"^(untitled|microsoft word|word -)", meta_title, re.IGNORECASE
-        ):
-            logger.debug(f"[title/docinfo] '{meta_title[:80]}'")
-            return _trim_to_sentence(meta_title)
-    except Exception as exc:
-        logger.debug(f"[title/metadata] {exc}")
-    return ""
+# def _extract_via_metadata(pdf_bytes: bytes) -> str:
+#     try:
+#         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+#         # XMP first (more reliable for modern academic PDFs)
+#         xmp = doc.get_xml_metadata()
+#         if xmp:
+#             m = re.search(r"<dc:title[^>]*>.*?<rdf:li[^>]*>(.*?)</rdf:li>", xmp, re.DOTALL)
+#             if m:
+#                 t = _clean(re.sub(r"<[^>]+>", "", m.group(1)))
+#                 if not _is_noise(t):
+#                     logger.debug(f"[title/xmp] '{t[:80]}'")
+#                     return _trim_to_sentence(t)
+#         # DocInfo fallback
+#         meta_title = _clean((doc.metadata or {}).get("title", ""))
+#         if meta_title and not _is_noise(meta_title) and not re.match(
+#             r"^(untitled|microsoft word|word -)", meta_title, re.IGNORECASE
+#         ):
+#             logger.debug(f"[title/docinfo] '{meta_title[:80]}'")
+#             return _trim_to_sentence(meta_title)
+#     except Exception as exc:
+#         logger.debug(f"[title/metadata] {exc}")
+#     return ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────

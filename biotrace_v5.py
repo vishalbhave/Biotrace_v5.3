@@ -69,87 +69,32 @@ for _d in [DATA_DIR, CSV_DIR, PDF_DIR]:
 
 # [ENHANCEMENT: biotrace_geocoding_lifestage_patch] — Patch A: Nominatim India
 # bias + Patch B: LLM prompt life-stage guard + post-parse filter
+from biotrace_geocoding_lifestage_patch import (
+    patch_geocoding_cascade,
+    PROMPT_LIFESTAGE_GUARD,
+    post_parse_lifestage_filter,
+    scan_genus_context,
+)
 
+# [ENHANCEMENT: biotrace_locality_guard_patch] — Locality guard: rejects
+# morphology-as-locality and habitat-as-locality from LLM output
+from biotrace_locality_guard_patch import PROMPT_LOCALITY_GUARD, post_parse_locality_filter
+
+# [ENHANCEMENT: biotrace_traiter_prepass] — Stage 0: rule-based spaCy pre-pass
+# annotates taxa, localities, measurements, habitats before LLM sees the text
 from biotrace_traiter_prepass import run_prepass, format_annotations_for_prompt
 
+# NOTE: biotrace_dedup_patch.dedup_occurrences is imported AFTER the biotrace_gnv
+# try/except block below (~line 225) so it correctly overrides the gnv version.
+# DO NOT import it here — a premature import would be silently overwritten by gnv.
 
-PROMPT_LIFESTAGE_GUARD = "Do not extract life stages (e.g. juvenile, adult, larva, pupa, egg, seeds, spores) as taxa or localities. Ignore them completely."
-
-def post_parse_lifestage_filter(occurrences):
-    valid = []
-    invalid_terms = ["juvenile", "adult", "larva", "pupa", "egg", "seeds", "spores", "nauplius", "zoea", "megalopa"]
-    for occ in occurrences:
-        name = str(occ.get("scientificName", "")).lower()
-        if not any(term in name for term in invalid_terms):
-            valid.append(occ)
-    return valid
-
-def scan_genus_context(occurrence, text):
-    return occurrence
-
-def patch_geocoding_cascade():
-    pass
-
-
-PROMPT_LOCALITY_GUARD = "Do not extract habitats (e.g. mangrove, coral reef, rocky shore) or morphological features as geographic localities. Only extract specific named places."
-
-def post_parse_locality_filter(occurrences):
-    valid = []
-    invalid_locs = ["mangrove", "coral reef", "rocky shore", "intertidal", "pelagic", "benthic", "sediment", "water column", "gill", "fin", "gut"]
-    for occ in occurrences:
-        loc = str(occ.get("verbatimLocality", "")).lower()
-        if not any(loc == term for term in invalid_locs):
-            valid.append(occ)
-    return valid
-
-
-def _canon(name: str) -> str:
-    return re.sub(r'\s+', ' ', re.sub(r'[^a-zA-Z0-9 ]', '', name.lower())).strip()
-
-def _loc_key(loc: str) -> str:
-    import re
-    loc = str(loc).lower()
-    loc = re.sub(r'\s+', ' ', re.sub(r'[^a-zA-Z0-9 ]', '', loc)).strip()
-    stopwords = {"and", "the", "in", "of", "at", "near", "from"}
-    return " ".join([w for w in loc.split() if w not in stopwords])
-
-def dedup_occurrences(occurrences, keep_secondary=True, filter_non_taxon=True):
-    seen = {}
-    removed = 0
-    for occ in occurrences:
-        name = str(occ.get("scientificName") or occ.get("recordedName", ""))
-        loc = str(occ.get("verbatimLocality", ""))
-        key = f"{_canon(name)}||{_loc_key(loc)}"
-        if key not in seen:
-            seen[key] = occ
-        else:
-            removed += 1
-    return list(seen.values()), removed
-
-def suppress_regional_duplicates(occurrences):
-    return occurrences, 0
-
-
-
-try:
-    from biotrace_v5_enhancements import (
-        render_verification_table       as _render_verification_table,
-        render_tnr_tab                  as _render_tnr_tab,
-        render_locality_tab             as _render_locality_tab,
-        render_schema_diagnostics       as _render_schema_diagnostics,
-        render_ollama_model_selector    as _render_ollama_model_selector,
-        occurrences_to_verification_df,
-    )
-except ImportError:
-    _render_verification_table = None
-    _render_tnr_tab = None
-    _render_locality_tab = None
-    _render_schema_diagnostics = None
-    _render_ollama_model_selector = None
-    def occurrences_to_verification_df(o): return []
-
-
-
+if not st.session_state.get("_geo_patched"):
+    patch_geocoding_cascade()
+    st.session_state["_geo_patched"] = True
+    
+    
+from biotrace_dedup_patch import dedup_occurrences
+from biotrace_dedup_patch import suppress_regional_duplicates
 from biotrace_progress_logger import BioTraceLogger, render_species_progress_panel
 
 
@@ -615,6 +560,33 @@ def insert_occurrences(occurrences, file_hash, source_title, session_id):
             except Exception:
                 tax = {}
 
+        # PATCHED-R2: R2-taxonomy-fallback — unpack Higher Taxonomy JSON when
+        # flat fields are empty (happens when GNA verifier skips or fails)
+        def _tax_field(key_variants: list, fallback: str = "") -> str:
+            for k in key_variants:
+                v = occ.get(k)
+                if v and str(v).strip():
+                    return str(v).strip()[:100]
+            # Fallback: pull from Higher Taxonomy dict
+            if isinstance(tax, dict):
+                for k in key_variants:
+                    v = tax.get(k) or tax.get(k.rstrip("_"))
+                    if v and str(v).strip():
+                        return str(v).strip()[:100]
+            return fallback
+
+        _phylum  = _tax_field(["phylum",  "Phylum"])
+        _class   = _tax_field(["class_",  "class", "Class"])
+        _order   = _tax_field(["order_",  "order", "Order"])
+        _family  = _tax_field(["family_", "family","Family"])
+
+        # Citation: prefer per-record "Source Citation", then session citation,
+        # then source_title (which is now citation_str, not doc_title)
+        _citation = (
+            str(occ.get("Source Citation") or occ.get("sourceCitation") or "").strip()
+            or source_title   # source_title is now citation_str (see line ~2384 fix)
+        )
+
         con.execute("""
             INSERT INTO occurrences_v4 (
                 file_hash, recordedName, validName, higherTaxonomy,
@@ -629,19 +601,16 @@ def insert_occurrences(occurrences, file_hash, source_title, session_id):
             str(occ.get("recordedName") or occ.get("Recorded Name",""))[:300],
             sp[:300],
             json.dumps(tax),
-            str(occ.get("Source Citation") or occ.get("sourceCitation", source_title))[:500],
+            _citation[:500],
             str(occ.get("Habitat") or occ.get("habitat",""))[:300],
             sampling_str,
             str(occ.get("Raw Text Evidence") or occ.get("rawTextEvidence",""))[:1000],
-            _to_float(occ.get("decimalLatitude")), 
-            _to_float(occ.get("decimalLongitude")), 
+            _to_float(occ.get("decimalLatitude")),
+            _to_float(occ.get("decimalLongitude")),
             str(occ.get("verbatimLocality",""))[:300],
             str(occ.get("occurrenceType",""))[:50],
             str(occ.get("geocodingSource",""))[:100],
-            str(occ.get("phylum") or occ.get("Phylum",""))[:100],
-            str(occ.get("class_") or occ.get("class") or occ.get("Class",""))[:100],
-            str(occ.get("order_") or occ.get("order") or occ.get("Order",""))[:100],
-            str(occ.get("family_") or occ.get("family") or occ.get("Family",""))[:100],
+            _phylum, _class, _order, _family,
             str(occ.get("wormsID",""))[:20],
             str(occ.get("itisID",""))[:20],
             str(occ.get("taxonRank",""))[:50],
@@ -847,8 +816,17 @@ def extract_thinker(
     # ── Layer 1: GNA Finder API ───────────────────────────────────────────────
     if find_species_with_gnfinder  is not None:
         try:
-            gna_names = find_species_with_gnfinder(chunk_text[:8000])
-            if gna_names:
+            # PATCHED: P1-gna-finder-dict-fix — find_names_in_text returns list[dict]
+            gna_raw = find_species_with_gnfinder(chunk_text[:8000])
+            if gna_raw:
+                if gna_raw and isinstance(gna_raw[0], dict):
+                    gna_names = [
+                        d.get("scientificName") or d.get("verbatimName", "")
+                        for d in gna_raw
+                        if (d.get("scientificName") or d.get("verbatimName", "")).strip()
+                    ]
+                else:
+                    gna_names = [str(n) for n in gna_raw if str(n).strip()]
                 found.extend(gna_names)
                 log_cb(f"    [GNA Finder] {len(gna_names)} names detected")
         except Exception as exc:
@@ -919,11 +897,18 @@ def extract_thinker(
             log_cb(f"    [Thinker/regex] {len(regex_names)} names (relaxed fallback)")
 
     # Deduplicate preserving order
+    # PATCHED: P2-candidate-filter-thinker — drop NER placeholder IDs and non-taxon strings
+    _CAND_ID_RE = re.compile(r"^__candidate_\d+_\d+$")
+    _TAXON_START_RE = re.compile(r"^[A-Z][a-z]{2,}")
+
     seen:   set[str]  = set()
     unique: list[str] = []
     for n in found:
         n_strip = n.strip()
-        if n_strip and n_strip not in seen:
+        if (n_strip
+                and n_strip not in seen
+                and not _CAND_ID_RE.match(n_strip)
+                and _TAXON_START_RE.match(n_strip)):
             seen.add(n_strip)
             unique.append(n_strip)
 
@@ -1756,9 +1741,14 @@ def extract_occurrences(
             removed_records = [r for r in before if r not in results]
             log_cb(f"[Dedup] Removed {n_removed} duplicates (stages 1+2)")
 
-    results, n_suppressed = suppress_regional_duplicates(results)
+    # PATCHED: P5-checklist-mode-suppress — honour checklist mode in stage-3 dedup
+    _checklist_mode = st.session_state.get("is_checklist", False) if 'st' in dir() else False
+    results, n_suppressed = suppress_regional_duplicates(
+        results, checklist_mode=_checklist_mode
+    )
     if n_suppressed:
-        log_cb(f"[Dedup/Stage3] Suppressed {n_suppressed} regional-level duplicates")
+        log_cb(f"[Dedup/Stage3] Suppressed {n_suppressed} regional-level duplicates"
+               f" (checklist_mode={_checklist_mode})")
 
     # Feed dedup result into tracker
     if hasattr(log_cb, 'log_dedup_result'):
@@ -2119,6 +2109,9 @@ with st.sidebar:
     _status(True,  "biotrace_col_client.py",                "biotrace_col_client.py",                is_local=True)
     _status(True,  "biotrace_relation_extractor.py",        "biotrace_relation_extractor.py",        is_local=True)
     _status(True,  "biotrace_kg_spatio_temporal.py",        "biotrace_kg_spatio_temporal.py",        is_local=True)
+    # PATCHED: SIDEBAR-new-module-status
+    _status(True,  "biotrace_gbif_verifier.py",             "biotrace_gbif_verifier.py",             is_local=True)
+    _status(True,  "biotrace_agent_loop.py",                "biotrace_agent_loop.py",                is_local=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2170,14 +2163,18 @@ with tabs[0]:
                 except Exception as e:
                     logger.warning(f"Title extraction failed: {e}")
                     
+            # PATCHED: P6-pdf-backup-gate — use original filename; skip if already saved
             backup_dir = os.path.join(DATA_DIR, "backup_manuscripts")
             os.makedirs(backup_dir, exist_ok=True)
-            clean_name = re.sub(r'[\\/*?:"<>|]', "", st.session_state['auto_title'])
-            file_ext = os.path.splitext(uploaded.name)[1]
-            backup_path = os.path.join(backup_dir, f"{clean_name}{file_ext}")
-            
-            with open(backup_path, "wb") as f:
-                f.write(uploaded.getvalue())
+            # Use the original uploaded filename (not auto_title which may be blank)
+            safe_backup_name = re.sub(r'[\\/*?:"<>|]', "_", uploaded.name)
+            backup_path = os.path.join(backup_dir, safe_backup_name)
+            if not os.path.exists(backup_path):
+                with open(backup_path, "wb") as f:
+                    f.write(uploaded.getvalue())
+                logger.info("[upload] Backup saved: %s", backup_path)
+            else:
+                logger.debug("[upload] Backup already exists, skipping: %s", backup_path)
             st.session_state['backup_path'] = backup_path
 
     # ── PDF Metadata panel ────────────────────────────────────────────────────
@@ -2205,6 +2202,7 @@ with tabs[0]:
         else:
             st.caption("❌ biotrace_pdf_meta.py not found — place it alongside biotrace_v5.py")
 
+    # PATCHED: P4-checklist-hitl-toggles — add checklist mode and HITL approval
     col_a, col_b, col_c = st.columns([3,1,1])
     with col_a:
         doc_title = st.text_input(
@@ -2213,9 +2211,22 @@ with tabs[0]:
         )
     with col_b:
         primary_only = st.checkbox("Primary records only", value=False)
+        is_checklist = st.checkbox(
+            "📋 Checklist paper mode",
+            value=False,
+            help="Keeps 'cf.', 'sp.', and authority forms as separate entries. "
+                 "Use for annotated checklists where the table lists them distinctly.",
+            key="is_checklist",
+        )
     with col_c:
         do_split_loc = st.checkbox("Split localities", value=True,
                                    help="Expand 'Site A, B and C' → 3 records")
+        use_hitl = st.checkbox(
+            "🔬 Approve before saving",
+            value=True,
+            help="HITL gate: review + approve species before they enter DB/KG/Memory.",
+            key="use_hitl_approval",
+        )
 
     # ── v5.3 chunking controls ────────────────────────────────────────────────
     with st.expander("🧩 Chunking & Extraction Options", expanded=False):
@@ -2263,13 +2274,120 @@ with tabs[0]:
         log_cb    = log_inst   # drop-in: same __call__ signature
         progress_placeholder = st.empty()
 
+        # PATCHED-R2: R1-hitl-reset — checkpoint pipeline into session_state
+        # If HITL is waiting for Confirm, restore the pending occurrences
+        # from the checkpoint instead of re-running the full pipeline.
+        _hitl_pending = st.session_state.get("_hitl_pending_occurrences")
+        _hitl_hash    = st.session_state.get("_hitl_pending_hash", "")
+
+        if _hitl_pending is not None:
+            # User clicked Confirm after HITL gate — resume from checkpoint
+            from biotrace_gbif_verifier import render_approval_table
+            approved = render_approval_table(_hitl_pending)
+            if approved is None:
+                st.stop()   # still waiting
+            # Clear checkpoint and continue with approved list
+            occurrences = approved
+            file_hash   = _hitl_hash
+            session_id  = st.session_state.get("_hitl_pending_session", f"session_resumed")
+            citation_str= st.session_state.get("_hitl_pending_citation", uploaded.name)
+            doc_title   = st.session_state.get("_hitl_pending_title", uploaded.name)
+            del st.session_state["_hitl_pending_occurrences"]
+            log_cb(f"[HITL] Resumed with {len(occurrences)} approved species")
+
+            # Jump straight to geocoding + save
+            occurrences = geocode_occurrences(occurrences, log_cb)
+            try:
+                from biotrace_postprocessing import run_postprocessing
+                occurrences, pp_summary = run_postprocessing(
+                    occurrences, citation_str=citation_str,
+                    wiki_root=WIKI_ROOT, geonames_db=GEONAMES_DB,
+                    use_nominatim=True, log_cb=log_cb,
+                )
+                st.session_state["pp_conflicts"]    = pp_summary.get("conflicts", [])
+                st.session_state["pp_conflict_log"] = pp_summary.get("conflict_log", [])
+            except Exception as _pp_exc:
+                log_cb(f"[Post] {_pp_exc}", "warn")
+
+            n = insert_occurrences(occurrences, file_hash, citation_str, session_id)
+            log_cb(f"[DB] {n} records saved (resumed session {session_id})")
+            if any([use_kg, use_mb, use_wiki]):
+                ingest_into_v5_systems(
+                    occurrences, citation=citation_str, session_id=session_id,
+                    log_cb=log_cb, provider=provider, model_sel=model_sel,
+                    api_key=api_key, ollama_base_url=ollama_url,
+                    update_wiki_narratives=wiki_narr,
+                )
+            st.success(f"✅ {len(occurrences)} occurrence records saved after approval.")
+            df = pd.DataFrame(occurrences)
+            st.dataframe(df[[c for c in
+                ["recordedName","validName","family_","phylum","verbatimLocality",
+                 "occurrenceType","wormsID"] if c in df.columns]],
+                use_container_width=True, height=350)
+            st.stop()   # done — don't fall through to full pipeline
+
+        # PATCHED-R2: R1-hitl-reset — checkpoint pipeline into session_state
+        # If HITL is waiting for Confirm, restore the pending occurrences
+        # from the checkpoint instead of re-running the full pipeline.
+        _hitl_pending = st.session_state.get("_hitl_pending_occurrences")
+        _hitl_hash    = st.session_state.get("_hitl_pending_hash", "")
+
+        if _hitl_pending is not None:
+            # User clicked Confirm after HITL gate — resume from checkpoint
+            from biotrace_gbif_verifier import render_approval_table
+            approved = render_approval_table(_hitl_pending)
+            if approved is None:
+                st.stop()   # still waiting
+            # Clear checkpoint and continue with approved list
+            occurrences = approved
+            file_hash   = _hitl_hash
+            session_id  = st.session_state.get("_hitl_pending_session", f"session_resumed")
+            citation_str= st.session_state.get("_hitl_pending_citation", uploaded.name)
+            doc_title   = st.session_state.get("_hitl_pending_title", uploaded.name)
+            del st.session_state["_hitl_pending_occurrences"]
+            log_cb(f"[HITL] Resumed with {len(occurrences)} approved species")
+
+            # Jump straight to geocoding + save
+            occurrences = geocode_occurrences(occurrences, log_cb)
+            try:
+                from biotrace_postprocessing import run_postprocessing
+                occurrences, pp_summary = run_postprocessing(
+                    occurrences, citation_str=citation_str,
+                    wiki_root=WIKI_ROOT, geonames_db=GEONAMES_DB,
+                    use_nominatim=True, log_cb=log_cb,
+                )
+                st.session_state["pp_conflicts"]    = pp_summary.get("conflicts", [])
+                st.session_state["pp_conflict_log"] = pp_summary.get("conflict_log", [])
+            except Exception as _pp_exc:
+                log_cb(f"[Post] {_pp_exc}", "warn")
+
+            n = insert_occurrences(occurrences, file_hash, citation_str, session_id)
+            log_cb(f"[DB] {n} records saved (resumed session {session_id})")
+            if any([use_kg, use_mb, use_wiki]):
+                ingest_into_v5_systems(
+                    occurrences, citation=citation_str, session_id=session_id,
+                    log_cb=log_cb, provider=provider, model_sel=model_sel,
+                    api_key=api_key, ollama_base_url=ollama_url,
+                    update_wiki_narratives=wiki_narr,
+                )
+            st.success(f"✅ {len(occurrences)} occurrence records saved after approval.")
+            df = pd.DataFrame(occurrences)
+            st.dataframe(df[[c for c in
+                ["recordedName","validName","family_","phylum","verbatimLocality",
+                 "occurrenceType","wormsID"] if c in df.columns]],
+                use_container_width=True, height=350)
+            st.stop()   # done — don't fall through to full pipeline
+
         with st.spinner("Processing…"):
             clean_title = st.session_state.get('auto_title', uploaded.name)
             ts = int(time.time())
             suffix = Path(uploaded.name).suffix
             
-            safe_title = re.sub(r'[\\/*?:"<>|]', "", clean_title)
-            filename = f"{safe_title}_{ts}{suffix}"
+            # PATCHED: P7-pdf-hash-filename — content hash prevents re-extraction duplicates
+            safe_title = re.sub(r'[\\/*?:"<>|]', "_", clean_title or Path(uploaded.name).stem)
+            # Pre-compute hash here so we can use it in the filename
+            _pre_hash = hashlib.sha256(uploaded.getvalue()).hexdigest()[:8]
+            filename = f"{safe_title}_{_pre_hash}{suffix}"
             tmp_path = os.path.join(PDF_DIR, filename)
             
             raw_bytes = uploaded.getvalue()
@@ -2338,21 +2456,38 @@ with tabs[0]:
             log_cb(f"[Extract] Text: {len(md_text):,} chars | Citation: {citation_str[:60]}…")
 
             # ── Step 3: LLM Extraction (hierarchical) ─────────────────────────
+            # PATCHED: P9-agent-loop — self-correcting extraction with species-count check
             log_cb("[Extract] Running v5.3 hierarchical extraction…")
-            occurrences = extract_occurrences(
-                md_text, doc_title, provider, model_sel,
-                api_key, ollama_url, log_cb,
-                chunk_strategy   = chunk_strategy,
-                chunk_chars      = chunk_chars,
-                overlap_chars    = overlap_chars,
-                batch_mode       = False,
-                citation_string  = citation_str,
-                use_hierarchical = use_hierarchical,
-                use_scientific   = use_scientific,      # ← ADD THIS LINE
-                use_thinker      = use_thinker_cb,
-                use_auto_loc_ner = use_auto_loc and _LOC_NER_AVAILABLE,
-                geonames_db      = GEONAMES_DB,
-            )
+
+            def _run_standard_extraction(text_input):
+                return extract_occurrences(
+                    text_input, doc_title, provider, model_sel,
+                    api_key, ollama_url, log_cb,
+                    chunk_strategy   = chunk_strategy,
+                    chunk_chars      = chunk_chars,
+                    overlap_chars    = overlap_chars,
+                    batch_mode       = False,
+                    citation_string  = citation_str,
+                    use_hierarchical = use_hierarchical,
+                    use_scientific   = use_scientific,
+                    use_thinker      = use_thinker_cb,
+                    use_auto_loc_ner = use_auto_loc and _LOC_NER_AVAILABLE,
+                    geonames_db      = GEONAMES_DB,
+                )
+
+            try:
+                from biotrace_agent_loop import agent_extract_with_correction
+                _llm_partial = lambda p: call_llm(p, provider, model_sel, api_key, ollama_url)
+                occurrences = agent_extract_with_correction(
+                    full_text  = md_text,
+                    extract_fn = _run_standard_extraction,
+                    llm_fn     = _llm_partial,
+                    log_cb     = log_cb,
+                    max_retries = 2,
+                )
+            except ImportError:
+                log_cb("[Agent] biotrace_agent_loop.py not found — standard extraction", "warn")
+                occurrences = _run_standard_extraction(md_text)
             
             if hasattr(log_inst, 'log_extraction_result'):
                 log_inst.log_extraction_result("document", occurrences)
@@ -2385,6 +2520,51 @@ with tabs[0]:
                 log_cb(f"[Filter] Primary only: {len(occurrences)}/{before}")
 
             
+            # PATCHED-R2: R1b-hitl-checkpoint — save checkpoint before gate fires
+            if st.session_state.get("use_hitl_approval", True):
+                try:
+                    from biotrace_gbif_verifier import gbif_verify_batch, render_approval_table
+                    log_cb("[GBIF] Verifying species against GBIF Backbone Taxonomy…")
+                    occurrences = gbif_verify_batch(occurrences, min_confidence=80)
+                    n_auto = sum(1 for o in occurrences if o.get("gbifApproved"))
+                    log_cb(f"[GBIF] {n_auto}/{len(occurrences)} auto-approved")
+
+                    # Save checkpoint so HITL confirm can resume without re-running pipeline
+                    st.session_state["_hitl_pending_occurrences"] = occurrences
+                    st.session_state["_hitl_pending_hash"]        = file_hash
+                    st.session_state["_hitl_pending_session"]     = session_id
+                    st.session_state["_hitl_pending_citation"]    = citation_str
+                    st.session_state["_hitl_pending_title"]       = doc_title
+
+                    approved = render_approval_table(occurrences)
+                    if approved is None:
+                        st.stop()   # wait for biologist to confirm
+                    # Confirmed — clear checkpoint and continue
+                    del st.session_state["_hitl_pending_occurrences"]
+                    occurrences = approved
+                    log_cb(f"[HITL] {len(occurrences)} species approved for DB/KG/Memory")
+                except ImportError:
+                    log_cb("[GBIF] biotrace_gbif_verifier.py not found — skipping HITL gate",
+                           "warn")
+
+            # PATCHED: P8-gbif-hitl-gate — GBIF verification + HITL approval before DB insert
+            if st.session_state.get("use_hitl_approval", True):
+                try:
+                    from biotrace_gbif_verifier import gbif_verify_batch, render_approval_table
+                    log_cb("[GBIF] Verifying species against GBIF Backbone Taxonomy…")
+                    occurrences = gbif_verify_batch(occurrences, min_confidence=80)
+                    n_auto = sum(1 for o in occurrences if o.get("gbifApproved"))
+                    log_cb(f"[GBIF] {n_auto}/{len(occurrences)} auto-approved")
+
+                    approved = render_approval_table(occurrences)
+                    if approved is None:
+                        st.stop()   # wait for biologist to confirm
+                    occurrences = approved
+                    log_cb(f"[HITL] {len(occurrences)} species approved for DB/KG/Memory")
+                except ImportError:
+                    log_cb("[GBIF] biotrace_gbif_verifier.py not found — skipping HITL gate",
+                           "warn")
+
             # [ENHANCEMENT: biotrace_col_client] — Stage 5: COL taxonomy enrichment
             # Queries Catalogue of Life API; results cached in col_taxonomy_cache.
             # Runs after Step 4 so validName is already populated.
@@ -2435,13 +2615,37 @@ with tabs[0]:
             st.session_state["pp_conflicts"]    = pp_summary["conflicts"]
             st.session_state["pp_conflict_log"] = pp_summary["conflict_log"]
 
+            # PATCHED-R2: R3-citation-fix — stamp full citation_str on each record
+            # and pass citation_str (not doc_title) as source_title to insert
+            for _occ in occurrences:
+                if isinstance(_occ, dict):
+                    # Overwrite only if the per-record citation looks like a raw filename
+                    _rec_cit = str(_occ.get("Source Citation") or _occ.get("sourceCitation","")).strip()
+                    _looks_like_filename = (
+                        not _rec_cit
+                        or _rec_cit == doc_title
+                        or _rec_cit.lower().endswith((".pdf",".p65",".md",".txt"))
+                        or len(_rec_cit) < 20
+                    )
+                    if _looks_like_filename and citation_str and len(citation_str) > 20:
+                        _occ["Source Citation"] = citation_str
+                        _occ["sourceCitation"]  = citation_str
+
             # ── Step 8: Save to SQLite ────────────────────────────────────────
-            n = insert_occurrences(occurrences, file_hash, doc_title, session_id)
+            n = insert_occurrences(occurrences, file_hash, citation_str, session_id)
             log_cb(f"[DB] {n} records saved (session {session_id})")
             
             if hasattr(log_inst, 'log_saved'):
                 log_inst.log_saved(n)
             # Final panel render with all stages populated
+            # PATCHED: P3-tracker-purge — remove NER placeholder IDs before render
+            if hasattr(log_inst, 'tracker') and hasattr(log_inst.tracker, 'species'):
+                _CAND_PURGE_RE = re.compile(r"^__candidate_\d+_\d+$")
+                log_inst.tracker.species = {
+                    k: v for k, v in log_inst.tracker.species.items()
+                    if not _CAND_PURGE_RE.match(str(k))
+                }
+
             with progress_placeholder.container():
                 render_species_progress_panel(log_inst.tracker)
             
@@ -2680,34 +2884,90 @@ with tabs[3]:
                     height=min(400, 60 + 35 * len(_filt_occs)),
                 )
 
-                if st.button("💾 Save All Edits to Database", key="save_combined"):
-                    try:
-                        _save_con = _sql.connect(META_DB_PATH)
-                        _updated_count = 0
-                        for _, row in _edited_df.iterrows():
-                            _rid = row.get("id")
-                            if pd.notna(_rid):
-                                _save_con.execute(
-                                    "UPDATE occurrences_v4 SET "
-                                    "occurrenceType=?, validationStatus=?, notes=?, "
-                                    "decimalLatitude=?, decimalLongitude=?, geocodingSource=? "
-                                    "WHERE id=?",
-                                    (
-                                        row.get("occurrenceType","Uncertain"),
-                                        row.get("validationStatus","Review"),
-                                        row.get("notes",""),
-                                        _to_float(row.get("decimalLatitude")),
-                                        _to_float(row.get("decimalLongitude")),
-                                        str(row.get("geocodingSource","manual")),
-                                        int(_rid),
-                                    ),
-                                )
-                                _updated_count += 1
-                        _save_con.commit()
-                        _save_con.close()
-                        st.success(f"✅ Saved {_updated_count} edits to database.")
-                    except Exception as _e:
-                        st.error(f"Save failed: {_e}")
+                # PATCHED-R2: R5-edit-delete — full-field UPDATE + DELETE support
+                _col_save, _col_del = st.columns([3,1])
+
+                with _col_save:
+                    if st.button("💾 Save All Edits to Database", key="save_combined"):
+                        try:
+                            _save_con = _sql.connect(META_DB_PATH)
+                            _updated_count = 0
+                            for _, row in _edited_df.iterrows():
+                                _rid = row.get("id")
+                                if pd.notna(_rid):
+                                    _save_con.execute(
+                                        """UPDATE occurrences_v4 SET
+                                            recordedName=?, validName=?,
+                                            verbatimLocality=?, occurrenceType=?,
+                                            validationStatus=?, notes=?,
+                                            habitat=?, sourceCitation=?,
+                                            phylum=?, class_=?, order_=?, family_=?,
+                                            wormsID=?, taxonRank=?,
+                                            decimalLatitude=?, decimalLongitude=?,
+                                            geocodingSource=?
+                                        WHERE id=?""",
+                                        (
+                                            str(row.get("recordedName",""))[:300],
+                                            str(row.get("validName",""))[:300],
+                                            str(row.get("verbatimLocality",""))[:300],
+                                            str(row.get("occurrenceType","Uncertain"))[:50],
+                                            str(row.get("validationStatus","Review"))[:50],
+                                            str(row.get("notes",""))[:1000],
+                                            str(row.get("habitat",""))[:300],
+                                            str(row.get("sourceCitation",""))[:500],
+                                            str(row.get("phylum",""))[:100],
+                                            str(row.get("class_",""))[:100],
+                                            str(row.get("order_",""))[:100],
+                                            str(row.get("family_",""))[:100],
+                                            str(row.get("wormsID",""))[:20],
+                                            str(row.get("taxonRank",""))[:50],
+                                            _to_float(row.get("decimalLatitude")),
+                                            _to_float(row.get("decimalLongitude")),
+                                            str(row.get("geocodingSource","manual"))[:100],
+                                            int(_rid),
+                                        ),
+                                    )
+                                    _updated_count += 1
+                            _save_con.commit()
+                            _save_con.close()
+                            st.success(f"✅ Saved {_updated_count} edits to database.")
+                            st.rerun()
+                        except Exception as _e:
+                            st.error(f"Save failed: {_e}")
+
+                with _col_del:
+                    # Row-level delete: select by ID
+                    _del_ids_str = st.text_input(
+                        "Delete record IDs (comma-separated):",
+                        placeholder="e.g. 12, 47, 93",
+                        key="delete_ids_input",
+                    )
+                    if st.button("🗑️ Delete Selected", key="delete_selected_btn",
+                                 type="secondary"):
+                        if _del_ids_str.strip():
+                            try:
+                                _del_ids = [
+                                    int(x.strip())
+                                    for x in _del_ids_str.split(",")
+                                    if x.strip().isdigit()
+                                ]
+                                if _del_ids:
+                                    _del_con = _sql.connect(META_DB_PATH)
+                                    _del_con.executemany(
+                                        "DELETE FROM occurrences_v4 WHERE id=?",
+                                        [(i,) for i in _del_ids],
+                                    )
+                                    _del_con.commit()
+                                    _del_con.close()
+                                    st.success(
+                                        f"🗑️ Deleted {len(_del_ids)} records: "
+                                        f"{_del_ids}"
+                                    )
+                                    st.rerun()
+                            except Exception as _de:
+                                st.error(f"Delete failed: {_de}")
+                        else:
+                            st.warning("Enter at least one record ID to delete.")
                         
                 _with_coords = _edited_df.dropna(subset=["decimalLatitude","decimalLongitude"])
                 if not _with_coords.empty:
@@ -2869,46 +3129,203 @@ with tabs[6]:
 
         st.divider()
 
+        # PATCHED-R2: R4-wiki-improvements — per-species map, taxonomy display,
+        # author normalization, richer locality checklist
+        import re as _re
+
+        def _strip_author(name: str) -> str:
+            """Remove authority suffix for display: 'Elysia obtusa Baba, 1938' → 'Elysia obtusa'"""
+            if not name: return name
+            return _re.sub(
+                r"\s+[A-Z][A-Za-z\-'']+(?:\s+(?:and|&|et)\s+[A-Z][A-Za-z\-'']+)?[,.]?\s*\d{4}.*$",
+                "", name
+            ).strip()
+
+        def _wiki_db_occurrences(species_name: str) -> pd.DataFrame:
+            """Pull occurrence rows from DB for a given species (handles author variants)."""
+            try:
+                import sqlite3 as _sq
+                _c = _sq.connect(META_DB_PATH)
+                _base = _strip_author(species_name).lower()
+                _df = pd.read_sql_query(
+                    """SELECT validName, recordedName, verbatimLocality, habitat,
+                              occurrenceType, sourceCitation, phylum, class_, order_,
+                              family_, wormsID, decimalLatitude, decimalLongitude,
+                              matchScore, taxonomicStatus
+                       FROM occurrences_v4
+                       WHERE lower(validName) LIKE ? OR lower(recordedName) LIKE ?
+                       ORDER BY id DESC""",
+                    _c,
+                    params=(f"%{_base}%", f"%{_base}%"),
+                )
+                _c.close()
+                return _df
+            except Exception:
+                return pd.DataFrame()
+
         sp_list = wiki.list_species()
         if sp_list:
-            selected_sp = st.selectbox("View Species Article:", sp_list)
+            # Normalise display names (strip authors for the selector)
+            _sp_display = sorted({_strip_author(s) for s in sp_list if s})
+            selected_sp_display = st.selectbox("View Species Article:", _sp_display)
+
+            # Find the original key (may have author)
+            selected_sp = next(
+                (s for s in sp_list if _strip_author(s) == selected_sp_display),
+                selected_sp_display,
+            )
+
             if selected_sp:
+                art = wiki.get_species_article(selected_sp) or {}
+                facts = art.get("facts", {})
+
+                # ── Taxonomy banner ──────────────────────────────────────────
+                _db_rows = _wiki_db_occurrences(selected_sp)
+                _phylum = facts.get("phylum","") or (_db_rows["phylum"].dropna().iloc[0] if not _db_rows.empty and "phylum" in _db_rows else "")
+                _family = facts.get("family","") or (_db_rows["family_"].dropna().iloc[0] if not _db_rows.empty and "family_" in _db_rows else "")
+                _order  = facts.get("order","")  or (_db_rows["order_"].dropna().iloc[0]  if not _db_rows.empty and "order_"  in _db_rows else "")
+                _wid    = facts.get("wormsID","") or (_db_rows["wormsID"].dropna().iloc[0] if not _db_rows.empty and "wormsID" in _db_rows else "")
+
+                _tax_parts = [p for p in [
+                    f"Phylum: **{_phylum}**"  if _phylum else None,
+                    f"Order: **{_order}**"    if _order  else None,
+                    f"Family: **{_family}**"  if _family else None,
+                ] if p]
+                if _tax_parts:
+                    st.markdown("  ·  ".join(_tax_parts))
+                if _wid:
+                    st.markdown(
+                        f"[🔗 WoRMS AphiaID {_wid}](https://www.marinespecies.org/aphia.php?p=taxdetails&id={_wid})"
+                    )
+
+                # ── Wiki narrative ───────────────────────────────────────────
                 md = wiki.render_species_markdown(selected_sp)
+                # Replace blank taxonomy lines in rendered markdown
+                if "Family: |" in md or "Phylum: |" in md:
+                    md = md.replace(
+                        "Family: |", f"Family: {_family} |"
+                    ).replace(
+                        "Phylum: |", f"Phylum: {_phylum} |"
+                    ).replace(
+                        "Order: |",  f"Order: {_order} |"
+                    )
                 st.markdown(md)
 
-                art = wiki.get_species_article(selected_sp)
-                if art and art.get("occurrences"):
-                    with st.expander("Occurrence Records"):
-                        st.dataframe(
-                            pd.DataFrame(art["occurrences"]),
-                            use_container_width=True,
-                        )
+                # ── Occurrence table from DB ──────────────────────────────────
+                if not _db_rows.empty:
+                    with st.expander(f"📋 {len(_db_rows)} occurrence records from database"):
+                        _show_cols = [c for c in [
+                            "validName","verbatimLocality","habitat","occurrenceType",
+                            "sourceCitation","wormsID","matchScore","taxonomicStatus",
+                            "decimalLatitude","decimalLongitude",
+                        ] if c in _db_rows.columns]
+                        st.dataframe(_db_rows[_show_cols], use_container_width=True,
+                                     hide_index=True)
+
+                # ── Per-species occurrence MAP (live from DB, not static) ─────
+                _map_rows = _db_rows.dropna(subset=["decimalLatitude","decimalLongitude"])
+                if not _map_rows.empty:
+                    st.markdown("#### 🗺️ Occurrence Map")
+                    st.caption(
+                        f"{len(_map_rows)} geocoded records for "
+                        f"*{_strip_author(selected_sp)}*"
+                    )
+                    st.map(
+                        _map_rows.rename(columns={
+                            "decimalLatitude": "lat",
+                            "decimalLongitude": "lon",
+                        })[["lat","lon"]],
+                        zoom=5,
+                    )
+                else:
+                    st.caption("No geocoded records — run Geocoding in Tab 4.")
+
+                # ── Provenance ───────────────────────────────────────────────
+                sources = _db_rows["sourceCitation"].dropna().unique().tolist() if not _db_rows.empty else []
+                if sources:
+                    with st.expander("📚 Provenance"):
+                        for s in sources:
+                            st.markdown(f"- {s}")
         else:
             st.info("No wiki articles yet. Run an extraction to populate.")
 
         st.divider()
-        st.subheader("Locality Checklist")
-        loc_list = wiki.list_localities()
-        if loc_list:
-            selected_loc = st.selectbox("Locality:", loc_list)
-            if selected_loc:
-                loc_art = wiki._load_article("locality", wiki._slug(selected_loc) if hasattr(wiki,"_slug") else selected_loc.lower().replace(" ","_"))
-                if loc_art:
-                    f = loc_art.get("facts",{})
-                    sp_cl = f.get("species_checklist",[])
-                    st.write(f"**{len(sp_cl)} species at {selected_loc}:**")
-                    if sp_cl:
+
+        with st.expander("📍 Locality Species Checklist"):
+            # ── Locality Checklist (improved: shows all species + all points) ────
+            st.subheader("📍 Locality Species Checklist")
+            st.caption("Species recorded at each locality, with all occurrence coordinates shown on the map.")
+            loc_list = wiki.list_localities()
+            if loc_list:
+                selected_loc = st.selectbox("Locality:", loc_list, key="wiki_loc_sel")
+                if selected_loc:
+                    # Load from DB (not just wiki JSON) for completeness
+                    try:
+                        import sqlite3 as _sq2
+                        _lc = _sq2.connect(META_DB_PATH)
+                        _loc_df = pd.read_sql_query(
+                            """SELECT DISTINCT validName, recordedName, habitat,
+                                    occurrenceType, sourceCitation,
+                                    family_, phylum, wormsID,
+                                    decimalLatitude, decimalLongitude
+                            FROM occurrences_v4
+                            WHERE verbatimLocality LIKE ?
+                                OR verbatimLocality LIKE ?
+                            ORDER BY family_, validName""",
+                            _lc,
+                            params=(f"%{selected_loc}%", f"%{selected_loc[:15]}%"),
+                        )
+                        _lc.close()
+                    except Exception:
+                        _loc_df = pd.DataFrame()
+
+                    if not _loc_df.empty:
+                        _sp_at_loc = _loc_df["validName"].dropna().unique().tolist()
+                        st.write(f"**{len(_sp_at_loc)} species recorded at {selected_loc}:**")
+
+                        # Two-column species list with family grouping
+                        _fam_groups: dict = {}
+                        for _, row in _loc_df.iterrows():
+                            fam = str(row.get("family_","") or "Unknown family")
+                            sp  = str(row.get("validName","") or row.get("recordedName",""))
+                            if sp:
+                                _fam_groups.setdefault(fam, [])
+                                if sp not in _fam_groups[fam]:
+                                    _fam_groups[fam].append(sp)
+
                         col_a, col_b = st.columns(2)
-                        half = len(sp_cl)//2
-                        with col_a:
-                            for sp in sp_cl[:half]:
+                        _fam_items = sorted(_fam_groups.items())
+                        half = len(_fam_items) // 2
+                        for col, items in [(col_a, _fam_items[:half]), (col_b, _fam_items[half:])]:
+                            with col:
+                                for fam, sps in items:
+                                    st.markdown(f"**{fam}**")
+                                    for sp in sps:
+                                        st.markdown(f"  • *{_strip_author(sp)}*")
+
+                        # Map: all geocoded points at this locality
+                        _loc_map = _loc_df.dropna(subset=["decimalLatitude","decimalLongitude"])
+                        if not _loc_map.empty:
+                            st.markdown("#### 🗺️ All occurrence points at this locality")
+                            st.map(
+                                _loc_map.rename(columns={
+                                    "decimalLatitude": "lat",
+                                    "decimalLongitude": "lon",
+                                })[["lat","lon"]],
+                                zoom=8,
+                            )
+                    else:
+                        # Fallback to wiki JSON
+                        _slug_fn = wiki._slug if hasattr(wiki,"_slug")else lambda x: x.lower().replace(" ","_")
+                        loc_art = wiki._load_article("locality", _slug_fn(selected_loc))
+                        if loc_art:
+                            f = loc_art.get("facts",{})
+                            sp_cl = f.get("species_checklist",[])
+                            st.write(f"**{len(sp_cl)} species (from wiki cache):**")
+                            for sp in sp_cl:
                                 st.write(f"• {sp}")
-                        with col_b:
-                            for sp in sp_cl[half:]:
-                                st.write(f"• {sp}")
-                    lat, lon = f.get("latitude"), f.get("longitude")
-                    if lat and lon:
-                        st.map(pd.DataFrame({"lat":[lat],"lon":[lon]}))
+                        else:
+                            st.info(f"No occurrence data found for '{selected_loc}'.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
