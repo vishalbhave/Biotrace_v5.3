@@ -33,6 +33,81 @@ import requests
 
 logger = logging.getLogger("biotrace.verifier")
 
+try:
+    from biotrace_reference_db import get_taxonomy_cache, save_taxonomy_cache
+except ImportError:
+    def get_taxonomy_cache(v): return {}
+    def save_taxonomy_cache(d, approved_by="sys"): pass
+
+try:
+    import pytaxize
+    _PYTAXIZE_AVAILABLE = True
+except ImportError:
+    _PYTAXIZE_AVAILABLE = False
+
+def _call_pytaxize_gbif(name: str) -> dict:
+    if not _PYTAXIZE_AVAILABLE: return {}
+    try:
+        df = pytaxize.gbif.search(sci=name)
+        if df is not None and not df.empty:
+            row = df.iloc[0]
+            return {
+                "gbif_id": str(row.get("usageKey", "")),
+                "phylum": row.get("phylum", ""),
+                "class_": row.get("class", ""),
+                "order_": row.get("order", ""),
+                "family_": row.get("family", ""),
+                "validName": row.get("scientificName", name),
+                "taxonomicStatus": "accepted" if row.get("status", "").lower() == "accepted" else "synonym",
+                "matchScore": 0.85
+            }
+    except Exception as exc:
+        pass
+    return {}
+
+def _call_pytaxize_col(name: str) -> dict:
+    if not _PYTAXIZE_AVAILABLE: return {}
+    try:
+        res = pytaxize.col.search(name=name)
+        if res and isinstance(res, list) and len(res) > 0:
+            item = res[0]
+            return {
+                "col_id": str(item.get("id", "")),
+                "validName": item.get("name", name),
+                "taxonomicStatus": item.get("name_status", "accepted"),
+                "matchScore": 0.85
+            }
+    except Exception as exc:
+        pass
+    return {}
+
+def parse_name(name: str) -> dict:
+    """Use gnparser REST API to break a scientific name into components."""
+    try:
+        url = f"https://parser.globalnames.org/api/v1/{requests.utils.quote(name)}"
+        r = requests.get(url, timeout=5)
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, list) and len(data) > 0:
+            item = data[0]
+            if item.get("parsed"):
+                canon = item.get("canonical", {}).get("simple", "")
+                authorship = item.get("authorship", {}).get("normalized", "")
+                year = item.get("authorship", {}).get("year", "")
+                parts = canon.split()
+                genus = parts[0] if len(parts) > 0 else ""
+                species = parts[1] if len(parts) > 1 else ""
+                return {
+                    "genus": genus,
+                    "species": species,
+                    "authorship": authorship,
+                    "year": year
+                }
+    except Exception as exc:
+        pass
+    return {}
+
+
 GNA_FINDER_URL   = "https://finder.globalnames.org/api/v1/find"
 GNA_VERIFIER_URL = "https://verifier.globalnames.org/api/v1/verifications"
 WORMS_REST_URL   = "https://www.marinespecies.org/rest"
@@ -218,15 +293,38 @@ def verify_occurrence_names(occurrences: list[dict]) -> list[dict]:
 
     unique_names = list(name_map.keys())
     if not unique_names: return occurrences
-    logger.info("[verifier] Verifying %d unique names…",len(unique_names))
 
-    # Batch GNA verification
+    # Progressive Learning: Check local reference cache first!
     verification: dict[str,dict] = {}
-    for i in range(0, len(unique_names), _BATCH):
-        batch = unique_names[i:i+_BATCH]
-        verification.update(_call_verifier(batch))
-        if i+_BATCH < len(unique_names):
-            time.sleep(0.3)
+    names_to_verify = []
+
+    for name in unique_names:
+        cached = get_taxonomy_cache(name)
+        if cached:
+            verification[name] = cached
+            verification[name]["matchScore"] = 1.0
+            verification[name]["nameAccordingTo"] = "Local_Ref_Cache"
+        else:
+            names_to_verify.append(name)
+
+    if names_to_verify:
+        logger.info("[verifier] Verifying %d unique names via API (%d loaded from cache)…", len(names_to_verify), len(unique_names) - len(names_to_verify))
+        # Batch GNA verification
+        for i in range(0, len(names_to_verify), _BATCH):
+            batch = names_to_verify[i:i+_BATCH]
+            api_results = _call_verifier(batch)
+            verification.update(api_results)
+
+            # Save new valid results to cache for progressive learning
+            for n, res in api_results.items():
+                if res.get("validName") and float(res.get("matchScore", 0)) >= _MIN_SCORE:
+                    res["verbatim_name"] = n
+                    save_taxonomy_cache(res, approved_by="API_Auto")
+
+            if i+_BATCH < len(names_to_verify):
+                time.sleep(0.3)
+    else:
+        logger.info("[verifier] All %d names loaded from local reference cache.", len(unique_names))
 
     # Apply to records
     verified_ct = 0
@@ -264,6 +362,20 @@ def verify_occurrence_names(occurrences: list[dict]) -> list[dict]:
             occ["order_"]  = ver.get("order_","")
             occ["family_"] = ver.get("family_","")
 
+            # Extract gnparser components
+            if "genus" in ver:
+                occ["genus"] = ver.get("genus", "")
+                occ["species"] = ver.get("species", "")
+                occ["authorship"] = ver.get("authorship", "")
+                occ["year"] = ver.get("year", "")
+            else:
+                comps = parse_name(valid_name)
+                occ["genus"] = comps.get("genus", "")
+                occ["species"] = comps.get("species", "")
+                occ["authorship"] = comps.get("authorship", "")
+                occ["year"] = comps.get("year", "")
+                ver.update(comps)
+
             # For marine species, upgrade with authoritative WoRMS REST taxonomy
             if worms_id:
                 wt = _worms_by_aphia(worms_id)
@@ -292,6 +404,28 @@ def verify_occurrence_names(occurrences: list[dict]) -> list[dict]:
                     occ["taxonomicStatus"] = wt.get("taxonomicStatus","unverified")
                     occ["nameAccordingTo"] = "WoRMS"
                     time.sleep(0.2)
+                else:
+                    # Fallback to pytaxize GBIF
+                    gb = _call_pytaxize_gbif(raw_name)
+                    if gb:
+                        occ["validName"]       = gb.get("validName","")
+                        occ["scientificName"]  = gb.get("validName","") or raw_name
+                        occ["phylum"]          = gb.get("phylum","")
+                        occ["class_"]          = gb.get("class_","")
+                        occ["order_"]          = gb.get("order_","")
+                        occ["family_"]         = gb.get("family_","")
+                        occ["taxonomicStatus"] = gb.get("taxonomicStatus","unverified")
+                        occ["matchScore"]      = gb.get("matchScore", 0)
+                        occ["nameAccordingTo"] = "GBIF (pytaxize)"
+                    else:
+                        # Fallback to pytaxize COL
+                        cl = _call_pytaxize_col(raw_name)
+                        if cl:
+                            occ["validName"]       = cl.get("validName","")
+                            occ["scientificName"]  = cl.get("validName","") or raw_name
+                            occ["taxonomicStatus"] = cl.get("taxonomicStatus","unverified")
+                            occ["matchScore"]      = cl.get("matchScore", 0)
+                            occ["nameAccordingTo"] = "COL (pytaxize)"
 
     logger.info("[verifier] %d/%d names resolved (score≥%.2f)",
                 verified_ct, len(unique_names), _MIN_SCORE)
