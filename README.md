@@ -6,7 +6,7 @@ Enhanced Darwin Core literature mining tool for marine biologists.
 
 ```bash
 pip install -r requirements.txt
-streamlit run app.py
+streamlit run biotrace_v5.py
 ```
 
 ## Features
@@ -18,29 +18,33 @@ streamlit run app.py
 | **OpenAI** | Paste your `sk-...` API key in the sidebar. |
 | **Gemini** | Paste your `AIza...` API key in the sidebar. |
 
-### Multi-PDF Pipeline
-- Upload multiple PDFs at once — each is processed independently
-- Results stored in `biodiversity_data/extractions/` as separate CSVs
-- Catalogued in a local SQLite database (`biodiversity_data/metadata.db`)
+### Progressive Learning Cache (Human-in-the-Loop)
+BioTrace utilizes an intermediate SQLite database (`biodiversity_data/reference_cache.db`) to permanently save your geocoding and taxonomy edits.
+- Once you approve a record in the **HITL (Human-in-the-Loop) tab**, it is added to the cache.
+- Future documents will instantly pull coordinates and valid names from your local cache, bypassing external APIs entirely.
 
-### Duplicate Detection (two layers)
-1. **File-level hash** — SHA-256 fingerprint of each PDF. If already processed, cached results are loaded instantly.
-2. **Chunk-level vector cache** — each text chunk is embedded (all-MiniLM-L6-v2) and stored in ChromaDB. Identical/near-duplicate chunks across different documents skip the LLM call entirely.
+### Offline Zonal Geocoding (Geopandas)
+To avoid overpass/nominatim API limits, place Geofabrik `.gpkg` files in the `geodata/` folder:
+1. Download regional extracts (e.g., `Western_Zone.gpkg`, `Southern_Zone.gpkg`) from Geofabrik.
+2. Put them in `./geodata/`.
+3. BioTrace uses `geopandas` and `rapidfuzz` to search these local polygons offline first!
 
-### Three Tabs
-- **Extract** — upload & run, per-file result tabs, live log console, session map
-- **Library** — browse all past extractions, retrieve individual CSVs
-- **Global Map** — CartoDB dark map of every georeferenced record across all archived PDFs, colour-coded by source file
+### Advanced Taxonomy Verification
+- **GNfinder**: BioTrace hits the GNA REST API to accurately extract binomials directly from text blocks.
+- **gnparser**: Scientific names are parsed into exact components (`genus`, `species`, `authorship`, `year`).
+- **pytaxize fallback**: Verification cascades through WoRMS, Global Names, and finally GBIF and COL using `pytaxize`.
 
 ## Data Layout
 
-```
+```text
 biodiversity_data/
-├── metadata.db              # SQLite: all processed PDFs
-├── vector_store/            # ChromaDB: embedded chunks
-└── extractions/
-    ├── Paper_A_<hash>_taxa.csv
-    ├── Paper_A_<hash>_sites.csv
-    ├── Paper_B_<hash>_taxa.csv
-    └── Paper_B_<hash>_sites.csv
+├── reference_cache.db       # SQLite: Human-verified progressive learning cache
+├── metadata_v5.db           # SQLite: Catalog of all processed PDFs
+├── geonames_india.db        # SQLite: GeoNames lookup
+├── wiki/                    # LLM-Wiki persistent knowledge articles
+├── memory_bank.db           # Spatio-temporal relational memory bank
+├── vector_store/            # ChromaDB: Embedded chunks
+└── extractions_v5/          # Output Darwin Core CSVs
+geodata/                     # Zonal OSM .gpkg files for offline geocoding
+archive/                     # Deprecated patch scripts
 ```

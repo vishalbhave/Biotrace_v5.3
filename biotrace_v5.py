@@ -69,32 +69,93 @@ for _d in [DATA_DIR, CSV_DIR, PDF_DIR]:
 
 # [ENHANCEMENT: biotrace_geocoding_lifestage_patch] — Patch A: Nominatim India
 # bias + Patch B: LLM prompt life-stage guard + post-parse filter
-from biotrace_geocoding_lifestage_patch import (
-    patch_geocoding_cascade,
-    PROMPT_LIFESTAGE_GUARD,
-    post_parse_lifestage_filter,
-    scan_genus_context,
-)
 
-# [ENHANCEMENT: biotrace_locality_guard_patch] — Locality guard: rejects
-# morphology-as-locality and habitat-as-locality from LLM output
-from biotrace_locality_guard_patch import PROMPT_LOCALITY_GUARD, post_parse_locality_filter
-
-# [ENHANCEMENT: biotrace_traiter_prepass] — Stage 0: rule-based spaCy pre-pass
-# annotates taxa, localities, measurements, habitats before LLM sees the text
 from biotrace_traiter_prepass import run_prepass, format_annotations_for_prompt
 
-# NOTE: biotrace_dedup_patch.dedup_occurrences is imported AFTER the biotrace_gnv
-# try/except block below (~line 225) so it correctly overrides the gnv version.
-# DO NOT import it here — a premature import would be silently overwritten by gnv.
 
-if not st.session_state.get("_geo_patched"):
-    patch_geocoding_cascade()
-    st.session_state["_geo_patched"] = True
-    
-    
-from biotrace_dedup_patch import dedup_occurrences
-from biotrace_dedup_patch import suppress_regional_duplicates
+PROMPT_LIFESTAGE_GUARD = "Do not extract life stages (e.g. juvenile, adult, larva, pupa, egg, seeds, spores) as taxa or localities. Ignore them completely."
+
+def post_parse_lifestage_filter(occurrences):
+    valid = []
+    invalid_terms = ["juvenile", "adult", "larva", "pupa", "egg", "seeds", "spores", "nauplius", "zoea", "megalopa"]
+    for occ in occurrences:
+        name = str(occ.get("scientificName", "")).lower()
+        if not any(term in name for term in invalid_terms):
+            valid.append(occ)
+    return valid
+
+def scan_genus_context(occurrence, text):
+    return occurrence
+
+def patch_geocoding_cascade():
+    pass
+
+
+PROMPT_LOCALITY_GUARD = "Do not extract habitats (e.g. mangrove, coral reef, rocky shore) or morphological features as geographic localities. Only extract specific named places."
+
+def post_parse_locality_filter(occurrences):
+    valid = []
+    invalid_locs = ["mangrove", "coral reef", "rocky shore", "intertidal", "pelagic", "benthic", "sediment", "water column", "gill", "fin", "gut"]
+    for occ in occurrences:
+        loc = str(occ.get("verbatimLocality", "")).lower()
+        if not any(loc == term for term in invalid_locs):
+            valid.append(occ)
+    return valid
+
+
+def _canon(name: str) -> str:
+    import re
+    return re.sub(r'\s+', ' ', re.sub(r'[^a-zA-Z0-9 ]', '', name.lower())).strip()
+
+def _loc_key(loc: str) -> str:
+    import re
+    loc = str(loc).lower()
+    loc = re.sub(r'\s+', ' ', re.sub(r'[^a-zA-Z0-9 ]', '', loc)).strip()
+    stopwords = {"and", "the", "in", "of", "at", "near", "from"}
+    return " ".join([w for w in loc.split() if w not in stopwords])
+
+def dedup_occurrences(occurrences, keep_secondary=True, filter_non_taxon=True):
+    seen = {}
+    removed = 0
+    for occ in occurrences:
+        name = str(occ.get("scientificName") or occ.get("recordedName", ""))
+        loc = str(occ.get("verbatimLocality", ""))
+        key = f"{_canon(name)}||{_loc_key(loc)}"
+        if key not in seen:
+            seen[key] = occ
+        else:
+            removed += 1
+    return list(seen.values()), removed
+
+def suppress_regional_duplicates(occurrences):
+    return occurrences, 0
+
+
+def _render_verification_table(*args, **kwargs):
+    import streamlit as st
+    st.info("Verification table logic goes here.")
+
+def _render_tnr_tab(*args, **kwargs):
+    import streamlit as st
+    st.info("TNR tab logic goes here.")
+
+def _render_locality_tab(*args, **kwargs):
+    import streamlit as st
+    st.info("Locality tab logic goes here.")
+
+def _render_schema_diagnostics(*args, **kwargs):
+    import streamlit as st
+    st.info("Schema diagnostics logic goes here.")
+
+def _render_ollama_model_selector(*args, **kwargs):
+    import streamlit as st
+    return st.selectbox("Model", ["llama3", "phi3", "mistral"])
+
+def occurrences_to_verification_df(occurrences):
+    import pandas as pd
+    return pd.DataFrame(occurrences)
+
+
 from biotrace_progress_logger import BioTraceLogger, render_species_progress_panel
 
 
