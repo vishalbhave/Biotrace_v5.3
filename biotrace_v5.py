@@ -104,7 +104,6 @@ def post_parse_locality_filter(occurrences):
 
 
 def _canon(name: str) -> str:
-    import re
     return re.sub(r'\s+', ' ', re.sub(r'[^a-zA-Z0-9 ]', '', name.lower())).strip()
 
 def _loc_key(loc: str) -> str:
