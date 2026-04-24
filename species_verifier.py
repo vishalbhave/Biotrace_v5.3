@@ -81,6 +81,7 @@ def _call_pytaxize_col(name: str) -> dict:
         pass
     return {}
 
+def parse_name(name: str) -> dict:
     """Use gnparser REST API to break a scientific name into components."""
     try:
         url = f"https://parser.globalnames.org/api/v1/{requests.utils.quote(name)}"

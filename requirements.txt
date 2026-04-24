@@ -1,0 +1,16 @@
+streamlit
+pandas
+requests
+geopandas
+rapidfuzz
+overpass
+pytaxize
+docling
+markitdown
+pymupdf4llm
+plotly
+ollama
+openai
+google-generativeai
+anthropic
+spacy

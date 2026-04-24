@@ -171,8 +171,6 @@ def load_all_cache(table_name="geographic"):
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     try:
-        if table_name not in ("geographic", "taxonomy", "habitat"):
-            raise ValueError(f"Invalid table name: {table_name}")
         c.execute(f"SELECT * FROM {table_name} ORDER BY timestamp DESC")
         rows = [dict(r) for r in c.fetchall()]
     except Exception as e:
