@@ -78,7 +78,6 @@ def init_db():
 # GEOGRAPHIC CACHE
 # ---------------------------------------------------------
 def get_geographic_cache(locality: str) -> dict:
-def get_geographic_cache(locality: str) -> dict:
     conn = _get_connection()
     try:
         c = conn.cursor()

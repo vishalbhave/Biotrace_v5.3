@@ -26,6 +26,11 @@ from __future__ import annotations
 import logging, os, sqlite3
 
 try:
+    from core.osm_db_handler import OSMDatabaseHandler
+except ImportError:
+    OSMDatabaseHandler = None
+
+try:
     from biotrace_reference_db import get_geographic_cache, save_geographic_cache
 except ImportError:
     def get_geographic_cache(loc): return {}
@@ -92,6 +97,7 @@ class GeocodingCascade:
     ):
         self.geonames_db   = geonames_db
         self.use_nominatim = use_nominatim
+        self._osm_handler = OSMDatabaseHandler() if OSMDatabaseHandler else None
 
         # Tool 2 — IndianPincodeGeocoder
         self._pincode = None
@@ -219,42 +225,28 @@ class GeocodingCascade:
                 result.append(occ); continue
 
             # Local Offline OSM Geopackage query (Zonal)
-            if _GPD_AVAILABLE and os.path.exists("geodata"):
-                match_found = False
-                import glob
-                # Search all .gpkg and .gpkg.zip files in geodata/
-                zonal_files = glob.glob("geodata/*.gpkg") + glob.glob("geodata/*.gpkg.zip")
-                for z_file in zonal_files:
-                    try:
-                        df = gpd.read_file(z_file, layer="multipolygons")
-                        # Try exact match first
-                        match = df[df["name"].str.lower() == locality.lower()]
+            if self._osm_handler:
+                osm_match = self._osm_handler.search_locality(locality)
+                if osm_match:
+                    occ["decimalLatitude"] = osm_match["lat"]
+                    occ["decimalLongitude"] = osm_match["lon"]
+                    if "geojson" in osm_match:
+                        occ["geojson_polygon"] = osm_match["geojson"]
 
-                        # If no exact match and fuzzy matching is available, try fuzzy
-                        if match.empty and _FUZZ_AVAILABLE:
-                            names = df["name"].dropna().tolist()
-                            best_match = fuzz_process.extractOne(locality, names, scorer=fuzz.ratio)
-                            if best_match and best_match[1] > 85: # Threshold
-                                match = df[df["name"] == best_match[0]]
+                    source_file = osm_match.get("source_file", "unknown.gpkg")
+                    occ["geocodingSource"] = f"Local_Offline_OSM_{source_file}"
+                    occ = self._validate(occ)
 
-                        if not match.empty:
-                            geom = match.iloc[0].geometry
-                            occ["decimalLatitude"] = geom.centroid.y
-                            occ["decimalLongitude"] = geom.centroid.x
-                            occ["geojson_polygon"] = geom.__geo_interface__
-                            occ["geocodingSource"] = f"Local_Offline_OSM_{os.path.basename(z_file)}"
-                            occ = self._validate(occ)
+                    # Save to cache for progressive learning
+                    save_geographic_cache(
+                        locality,
+                        occ["decimalLatitude"],
+                        occ["decimalLongitude"],
+                        occ.get("geojson_polygon"),
+                        approved_by="Local_OSM"
+                    )
 
-                            # Save to cache for progressive learning
-                            save_geographic_cache(locality, occ["decimalLatitude"], occ["decimalLongitude"], occ["geojson_polygon"], approved_by="Local_OSM")
-
-                            result.append(occ)
-                            match_found = True
-                            break # Found a match, stop searching other zones
-                    except Exception as e:
-                        logger.warning("[geocoding/Offline OSM] Error querying %s: %s", z_file, e)
-
-                if match_found:
+                    result.append(occ)
                     continue
 
             # Step 2: Pincode geocoder
