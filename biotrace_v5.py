@@ -82,8 +82,8 @@ try:
 except ImportError:
     def patch_geocoding_cascade(): pass
     PROMPT_LIFESTAGE_GUARD = ""
-    def post_parse_lifestage_filter(occs): return occs
-    def scan_genus_context(o, t): return o
+    def post_parse_lifestage_filter(occs, ctx=None): return occs, []
+    def scan_genus_context(text): return {}
 
 # [ENHANCEMENT: biotrace_locality_guard_patch]
 try:
