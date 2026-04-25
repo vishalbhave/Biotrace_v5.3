@@ -60,6 +60,7 @@ import logging
 import regex as re 
 from dataclasses import dataclass, field
 from typing import Optional
+from skllm import ZeroShotGPTClassifier
 
 logger = logging.getLogger("biotrace.sci_chunker")
 
@@ -94,7 +95,15 @@ def classify_section(heading: str) -> str:
     for role, keywords in _ROLE_KEYWORDS.items():
         if any(kw in h_lower for kw in keywords):
             return role
-    return "OTHER"
+
+    # Try scikit-llm for sections not easily caught by regex
+    try:
+        clf = ZeroShotGPTClassifier(openai_model="gpt-3.5-turbo")
+        clf.fit(None, ["METHODS", "RESULTS", "DISCUSSION", "TAXONOMY", "ABSTRACT", "INTRODUCTION", "OTHER"])
+        predicted = clf.predict([heading])[0]
+        return predicted
+    except Exception:
+        return "OTHER"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
