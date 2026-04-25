@@ -307,7 +307,7 @@ class BioTraceWiki:
             ("classification_path","classificationPath"),
             ("full_authority", "full_authority"),
             ("nomenclatural_status", "nomenclatural_status"),
-            ("order_", "order"),
+            ("order", "order"),
             ("suborder", "suborder"),
             ("diagnostic_characters", "diagnostic_characters"),
             ("coloration", "coloration"),
