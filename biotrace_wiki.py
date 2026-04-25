@@ -655,7 +655,7 @@ class BioTraceWiki:
             f"**Full Authority:** {f.get('full_authority', '-')}",
             f"**Nomenclatural Status:** {f.get('nomenclatural_status', '-')}",
             f"**Family:** {f.get('family_','-')}  |  "
-            f"**Order:** {f.get('order_','-')}  |  "
+            f"**Order:** {f.get('order','-')}  |  "
             f"**Suborder:** {f.get('suborder', '-')}  |  "
             f"**Phylum:** {f.get('phylum','-')}",
         ]
