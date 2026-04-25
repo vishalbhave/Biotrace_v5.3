@@ -634,6 +634,19 @@ class OccurrenceRecord(BaseModel):
     recorded_name: str
     valid_name: str = ""
     higher_taxonomy: str = ""
+    full_authority: str = ""
+    nomenclatural_status: str = ""
+    order: str = ""
+    suborder: str = ""
+    diagnostic_characters: str = ""
+    coloration: str = ""
+    size_metrics: str = ""
+    discussion: str = ""
+    repository_voucher: str = ""
+    collector: str = ""
+    collector_date: str = ""
+    type_locality: str = ""
+    depth_elevation: str = ""
     source_citation: str = ""
     habitat: str = "Not Reported"
     sampling_event: dict = {}
@@ -660,6 +673,19 @@ class OccurrenceRecord(BaseModel):
         return {
             "recordedName": self.recorded_name,
             "validName": self.valid_name,
+            "full_authority": self.full_authority,
+            "nomenclatural_status": self.nomenclatural_status,
+            "order": self.order,
+            "suborder": self.suborder,
+            "diagnostic_characters": self.diagnostic_characters,
+            "coloration": self.coloration,
+            "size_metrics": self.size_metrics,
+            "discussion": self.discussion,
+            "repository_voucher": self.repository_voucher,
+            "collector": self.collector,
+            "collector_date": self.collector_date,
+            "type_locality": self.type_locality,
+            "depth_elevation": self.depth_elevation,
             "sourceCitation": self.source_citation,
             "Habitat": self.habitat,
             "Sampling Event": self.sampling_event,

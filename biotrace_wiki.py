@@ -115,6 +115,18 @@ def _blank_species_article(name: str) -> dict:
             "depth_range_m":    [],
             "sampling_methods": [],
             "occurrence_types": [],
+            "full_authority": "",
+            "nomenclatural_status": "",
+            "order": "",
+            "diagnostic_characters": "",
+            "coloration": "",
+            "size_metrics": "",
+            "discussion": "",
+            "repository_voucher": "",
+            "collector": "",
+            "collector_date": "",
+            "type_locality": "",
+            "depth_elevation": "",
         },
         "narrative": "",
         "provenance": [],          # list of {citation, date, n_records}
@@ -293,6 +305,19 @@ class BioTraceWiki:
             ("taxon_rank","taxonRank"), ("taxonomic_status","taxonomicStatus"),
             ("name_according_to","nameAccordingTo"),
             ("classification_path","classificationPath"),
+            ("full_authority", "full_authority"),
+            ("nomenclatural_status", "nomenclatural_status"),
+            ("order_", "order"),
+            ("suborder", "suborder"),
+            ("diagnostic_characters", "diagnostic_characters"),
+            ("coloration", "coloration"),
+            ("size_metrics", "size_metrics"),
+            ("discussion", "discussion"),
+            ("repository_voucher", "repository_voucher"),
+            ("collector", "collector"),
+            ("collector_date", "collector_date"),
+            ("type_locality", "type_locality"),
+            ("depth_elevation", "depth_elevation"),
         ]:
             new_val = (occ.get(key) or "").strip()
             if new_val:
@@ -626,8 +651,12 @@ class BioTraceWiki:
         lines = [
             f"# {art['title']}",
             "",
+            "## Taxonomic & Authority Fields (Infobox)",
+            f"**Full Authority:** {f.get('full_authority', '-')}",
+            f"**Nomenclatural Status:** {f.get('nomenclatural_status', '-')}",
             f"**Family:** {f.get('family_','-')}  |  "
             f"**Order:** {f.get('order_','-')}  |  "
+            f"**Suborder:** {f.get('suborder', '-')}  |  "
             f"**Phylum:** {f.get('phylum','-')}",
         ]
         # Full taxonomy line
@@ -676,7 +705,14 @@ class BioTraceWiki:
 
         lines += ["", "## Summary", art.get("narrative","_No narrative generated yet._")]
 
+        lines += ["", "## Morphological & Diagnostic Fields (Description)"]
+        lines.append(f"- **Diagnostic Characters:** {f.get('diagnostic_characters', '-')}")
+        lines.append(f"- **Coloration:** {f.get('coloration', '-')}")
+        lines.append(f"- **Size Metrics:** {f.get('size_metrics', '-')}")
+        lines.append(f"- **Discussion:** {f.get('discussion', '-')}")
+
         lines += ["", "## Localities"]
+        lines.append(f"**Type Locality:** {f.get('type_locality', '-')}")
         for loc in sorted(set(f.get("localities",[])))[:15]:
             lines.append(f"- {loc}")
 
@@ -687,12 +723,15 @@ class BioTraceWiki:
         lines += ["", "## Sampling"]
         depths  = f.get("depth_range_m",[])
         methods = f.get("sampling_methods",[])
+        lines.append(f"- **Depth/Elevation:** {f.get('depth_elevation', '-')}")
         if depths:
             lines.append(f"- **Depths recorded:** {', '.join(depths)} m")
         if methods:
             lines.append(f"- **Methods:** {', '.join(methods)}")
 
-        lines += ["", "## Provenance"]
+        lines += ["", "## Provenance (Specimen Metadata)"]
+        lines.append(f"- **Repository/Voucher:** {f.get('repository_voucher', '-')}")
+        lines.append(f"- **Collector:** {f.get('collector', '-')} (Date: {f.get('collector_date', '-')})")
         for p in art.get("provenance",[]):
             lines.append(f"- {p.get('citation','?')} ({p.get('date','')[:10]})")
 

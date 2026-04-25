@@ -220,6 +220,26 @@ try:
 except ImportError:
     logger.warning("[v5] biotrace_chunker.py not found")
 
+# ── Unified verifier (v5.5) ───────────────────────────────────────────────
+from biotrace_unified_verifier import UnifiedTaxonVerifier, filter_candidates
+
+# Initialise once at module level (caches in same SQLite DB)
+_UNIFIED_VERIFIER: UnifiedTaxonVerifier | None = None
+
+def get_unified_verifier(meta_db_path: str) -> UnifiedTaxonVerifier:
+    global _UNIFIED_VERIFIER
+    if _UNIFIED_VERIFIER is None:
+        _UNIFIED_VERIFIER = UnifiedTaxonVerifier(
+            cache_db   = meta_db_path,
+            min_score  = 0.60,
+            kingdom    = "Animalia",
+            use_gnparser = True,
+            use_gbif   = True,
+            use_col    = True,
+            use_itis   = True,   # requires: pip install pytaxize
+        )
+    return _UNIFIED_VERIFIER
+
 _GNV_AVAILABLE = False
 GNVEnrichedVerifier = None
 LocalitySplitter    = None
@@ -254,7 +274,7 @@ except ImportError:
 _NER_AVAILABLE = False
 TaxonNER = None
 try:
-    from biotrace_ner import TaxonNER, extract_taxa, COPIOUSFilter
+    from biotrace_unified_ner import TaxonNER, extract_taxa, COPIOUSFilter
     _NER_AVAILABLE = True
     logger.info("[v5.2] TaxonNER loaded")
 except ImportError:
@@ -263,7 +283,7 @@ except ImportError:
 _LOC_NER_AVAILABLE = False
 LocalityNER = None
 try:
-    from biotrace_locality_ner import LocalityNER, segregate_locality_string
+    from biotrace_unified_ner import LocalityNER, segregate_locality_string
     _LOC_NER_AVAILABLE = True
     logger.info("[v5.2] LocalityNER loaded")
 except ImportError:
@@ -343,7 +363,7 @@ except ImportError:
 
 BiodiVizPipeline = None
 try:
-    from biotrace_hf_ner import BiodiVizPipeline
+    from biotrace_unified_ner import BiodiVizPipeline
     _BIODIVIZ_AVAILABLE = True
     logger.info("[v5.4] BiodiViz HF Pipeline loaded")
 except ImportError:
@@ -429,9 +449,22 @@ For EACH species x locality x event, return a JSON object with EXACTLY these key
   "Recorded Name"      — Scientific name exactly as written (never correct spelling). Expand abbreviations if genus is known. Include authority if present.
   "Valid Name"         — Leave as empty string "" (taxonomy enrichment fills this later).
   "Higher Taxonomy"    — Leave as empty string "" (taxonomy enrichment fills this later).
+  "full_authority"     — The author and year (e.g., Ihering, 1876). This is crucial for distinguishing between scientific synonyms.
+  "nomenclatural_status"— Tagging whether it is a "sp. nov." (new species) or a re-description.
+  "order"              — Order name.
+  "suborder"           — Suborder name.
+  "diagnostic_characters"— A "Key Features" list (e.g., "Spatulate penis", "Multiporous opaline gland", and "Radular formula (60 x 31.1.31)").
+  "coloration"         — Description of Coloration (Life vs. Preserved).
+  "size_metrics"       — Average length/width for "Size at a glance" stats.
+  "discussion"         — Any important discussion points about the specimen.
+  "repository_voucher" — The museum ID (e.g., BMNH reg. no. 197211).
+  "collector"          — Name of the person who collected the specimen.
+  "collector_date"     — Date of collection.
+  "type_locality"      — The specific site where the Holotype (the primary reference specimen) was found.
+  "depth_elevation"    — To create "3D" map insights or depth-profile charts.
   "Source Citation"    — PRIMARY/UNCERTAIN records: output the exact string from [CURRENT_DOCUMENT_METADATA] above. Do not guess author/year from text. Do NOT use inline citations from other authors.
                          SECONDARY records: use the historical cited work. Extract FULL reference string from Bibliography if present, otherwise use exact inline citation (e.g. "Browne, 1916").
-  "Habitat"            — Specific ecosystem type (Coral reef, Mangrove, Rocky intertidal, Seagrass bed, Pelagic, Estuarine). Use "Not Reported" if unspecified.
+  "Habitat"            — Specific ecosystem type (Coral reef, Mangrove, Rocky intertidal, Seagrass bed, Pelagic, Estuarine). Use "Not Reported" if unspecified. Include Habitat Context Keywords like "extreme low water," "snorkelling," or "intertidal".
   "Sampling Event"     — JSON string: {"date": "YYYY-MM-DD", "depth_m": "N", "method": "..."}. Use "YYYY/YYYY" for year ranges. Use "Not Reported" for missing fields.
   "Raw Text Evidence"  — EXACT verbatim sentence from the paper proving this occurrence, PLUS exactly one preceding and one succeeding sentence for context. Copy word-for-word.
   "verbatimLocality"   — Place name exactly as written. ONE location per record.
@@ -3230,13 +3263,43 @@ with tabs[6]:
                         f"{len(_map_rows)} geocoded records for "
                         f"*{_strip_author(selected_sp)}*"
                     )
-                    st.map(
-                        _map_rows.rename(columns={
-                            "decimalLatitude": "lat",
-                            "decimalLongitude": "lon",
-                        })[["lat","lon"]],
-                        zoom=5,
+
+                    import pydeck as pdk
+
+                    # Highlight type locality if present
+                    def _is_type(row):
+                        type_loc = str(row.get('type_locality', '')).lower()
+                        loc = str(row.get('verbatimLocality', '')).lower()
+                        if type_loc and type_loc in loc:
+                            return 1
+                        if "type" in loc:
+                            return 1
+                        return 0
+
+                    _map_rows['is_type_locality'] = _map_rows.apply(_is_type, axis=1)
+
+                    _map_rows['color'] = _map_rows['is_type_locality'].apply(
+                        lambda x: [255, 215, 0, 200] if x == 1 else [200, 30, 0, 160] # Gold if type locality, red otherwise
                     )
+
+                    layer = pdk.Layer(
+                        'ScatterplotLayer',
+                        data=_map_rows,
+                        get_position='[decimalLongitude, decimalLatitude]',
+                        get_color='color',
+                        get_radius=15000,
+                        pickable=True
+                    )
+
+                    view_state = pdk.ViewState(
+                        latitude=_map_rows['decimalLatitude'].mean(),
+                        longitude=_map_rows['decimalLongitude'].mean(),
+                        zoom=5,
+                        pitch=0
+                    )
+
+                    r = pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip={"text": "{verbatimLocality}"})
+                    st.pydeck_chart(r)
                 else:
                     st.caption("No geocoded records — run Geocoding in Tab 4.")
 
